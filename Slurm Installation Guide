@@ -2,3 +2,180 @@
 Pre-installation:
 #Create global user account
 https://wiki.docking.org/index.php/Slurm_Installation_Guide
+Slurm and MUNGE users need to have a consistent UID/GID across all nodes in the cluster. Creating global user accounts must be done before installing the RPMs. It can be done via LDAPAdmin or any services that you use to manage users. If you don't have access to those services, please contact your system administrators.
+
+Install the latest epel-release
+[Centos/RHEL]
+
+CentOS8: dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+CentOS7: yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+RHEL7:   yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+[Ubuntu]
+
+apt-get update
+Install MUNGE
+MUNGE is authentication service that Slurm uses validating users' credentials.
+
+sudo yum install munge munge-libs munge-devel
+(master node only) Create secret key
+dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key
+chown munge:munge /etc/munge/munge.key
+chmod 400 /etc/munge/munge.key
+For worker nodes, scp the munge.key from master node and set the correct ownership and permission
+
+scp -p /etc/munge/munge.key hostXXX:/etc/munge/munge.key
+Set ownership and permission to following directories
+chown -R munge: /etc/munge/ /var/log/munge/ /var/lib/munge /run/munge
+chmod 0700 /etc/munge/ /var/log/munge/
+Start and enable MUNGE daemon at boot time
+systemctl enable munge
+systemctl start  munge
+Increase number of MUNGE threads on master node (Optional by recommended on busy server)
+cp /usr/lib/systemd/system/munge.service /etc/systemd/system/munge.service
+vim /etc/systemd/system/munge.service
+Edit this line >> ExecStart=/usr/sbin/munged --num-threads 10
+Reload daemon and restart munge
+ systemctl daemon-reload
+ systemctl restart munge
+Install Slurm
+Although slurm is available on epel. It is better to build from RPMs to ensure we have the latest update.
+
+This still shows you how to set up slurm with accounting (slurmdbd using MySQL as database). Accounting is optional and can be skipped, but it is useful for keeping records of job and managing resources.
+
+Install prerequisite packages
+$ yum install rpm-build gcc python3 openssl openssl-devel pam-devel numactl numactl-devel hwloc hwloc-devel lua lua-devel readline-devel rrdtool-devel ncurses-devel gtk2-devel libibmad libibumad perl-Switch perl-ExtUtils-MakeMaker xorg-x11-xauth http-parser-devel json-c-devel mysql-devel libssh2-devel man2html
+If you are seeing this error, this means httpd 2.2 is installed in the server
+
+Error: httpd24u-filesystem conflicts with httpd-filesystem-2.4.35-5.el7.noarch
+Error: httpd24u-tools conflicts with httpd-tools-2.4.35-5.el7.x86_64
+Solution is to uninstall this version and run the yum command above again, it will install the correct package
+
+yum remove httpd
+yum remove httpd-tools
+yum remove httpd-filesystem
+If you are setting up slurmdbd, you will also need
+
+yum install mariadb-server mariadb-devel
+[Ubuntu] Download packages
+apt-get update
+apt-get install slurm slurmd slurm-client slurmrestd slurmdbd slurmcltd
+[Centos/RHEL] Build RPMS
+Check for the latest version in https://download.schedmd.com/slurm/
+
+The current version at the time of this tutorial is 22.05.5
+
+cd /root
+wget https://download.schedmd.com/slurm/slurm-22.05.5.tar.bz2
+export VER=22.05.5; rpmbuild -ta slurm-$VER.tar.bz2 --with mysql --with slurmrestd
+     # Includes accounting support with the slurm-slurmdbd package
+cd /root/rpmbuild/RPMS/x86_64
+For Master Node
+yum install slurm-$VER*rpm slurm-devel-$VER*rpm slurm-perlapi-$VER*rpm slurm-torque-$VER*rpm slurm-example-configs-$VER*rpm slurm-slurmctld-$VER*rpm slurm-slurmd-$VER*rpm slurm-libpmi-$VER*rpm slurm-slurmdbd-$VER*rpm slurm-slurmrestd-$VER*rpm
+For Worker Nodes
+yum install slurm-$VER*rpm slurm-devel-$VER*rpm slurm-perlapi-$VER*rpm slurm-torque-$VER*rpm slurm-example-configs-$VER*rpm slurm-slurmd-$VER*rpm slurm-libpmi-$VER*rpm slurm-slurmrestd-$VER*rpm
+Slurmctld
+Slurm.conf
+cd /etc/slurm
+cp slurm.conf.example slurm.conf
+Edit slurm.conf file, see gimel2's slurm.conf below
+Here is an example of cluster 2's slurm configuration
+If there is no slurm.conf.example, you can get one here https://github.com/SchedMD/slurm/blob/master/etc/slurm.conf.example
+Other directories
+mkdir -p /var/spool/slurm-llnl /var/run/slurm-llnl /var/log/slurm-llnl
+chown -R slurm:slurm /var/spool/slurm-llnl /var/run/slurm-llnl /var/log/slurm-llnl /etc/slurm
+Open Firewall
+firewall-cmd --permanent --zone=public --add-port=6817/tcp #slurmctld
+firewall-cmd --permanent --zone=public --add-port=6818/tcp #slurmd
+firewall-cmd --reload
+Start daemon
+systemctl enable slurmctld
+systemctl start slurmctld
+systemctl enable slurmdbd
+systemctl start slurmdbd 
+Verify Setup
+sinfo -lNe # list nodes and partitions
+Slurmdbd
+This will show you how to set up slurmdb's accounting storage in Mariadb. Slurmdbd doesn't need to be installed in the master node.
+
+Make sure that mariadb packages are installed before built Slurm RPMs
+
+rpm -q mariadb-server mariadb-devel
+rpm -ql slurm-slurmdbd | grep accounting_storage_mysql.so     # Must show location of this file
+
+Start daemon
+systemctl start mariadb
+systemctl enable mariadb
+Configure db
+1. Set up db's root password
+
+/usr/bin/mysql_secure_installation
+2. Create db
+
+mysql -p
+> grant all on slurm_acct_db.* TO 'slurm'@'localhost' identified by 'some_pass' with grant option;  ### WARNING: change the "some_pass" to the db password you just set.
+> SHOW VARIABLES LIKE 'have_innodb';
+> create database slurm_acct_db;
+> quit;
+To verify db grant for slurm user
+mysql -p -u slurm
+> show grants;
+> quit;
+Slurmdbd.conf
+LogFile=/var/log/slurm/slurmdbd.log
+DbdHost=XXXX    # Replace by the slurmdbd server hostname (for example, 
+slurmdbd.my.domain)
+DbdPort=6819    # The default value
+SlurmUser=slurm
+StorageHost=localhost
+StoragePass=some_pass    # The above defined database password
+StorageLoc=slurm_acct_db
+.
+.
+LogFile=/var/log/slurm-llnl/slurmdbd.log
+PidFile=/var/run/slurm-llnl/slurmdbd.pid
+# Add these variables below so that the db doesn't get too big
+PurgeEventAfter=3months
+PurgeJobAfter=3months
+PurgeResvAfter=3months
+PurgeStepAfter=2months
+PurgeSuspendAfter=1month
+PurgeTXNAfter=3months
+PurgeUsageAfter=3months
+
+Change ownership and permission
+
+chown slurm: /etc/slurm/slurmdbd.conf
+chmod 600 /etc/slurm/slurmdbd.conf
+systemctl restart slurmdbd
+Firewall
+firewall-cmd --permanent --zone=public --add-port=6819/tcp #slurmdbd
+firewall-cmd --reload
+Verify Setup
+scontrol show config | grep AccountingStorageHost
+sacct -a
+Slurmd
+Follow the Build RPMS above for Worker Nodes
+
+Slurm.conf
+You will need to edit the slurm.conf in master node and copy it to the worker node. Figure out what CPU/Memory resources you have at this worker node
+
+cat /proc/cpuinfo
+or
+slurmd -C
+append the following line:
+
+NodeName=[Node_Name] NodeAddr=XX.XX.XX.XXX CPUs=[no_cpu] State=UNKNOWN
+You can choose to add the new node into partition or having this line which will automatically add any nodes 
+PartitionName=gimel2.cpu Nodes=ALL Default=YES MaxTime=INFINITE State=UP
+Setup directories
+mkdir -p /var/spool/slurm-llnl /var/run/slurm-llnl /var/log/slurm-llnl
+chown -R slurm:slurm /etc/slurm /var/spool/slurm-llnl /var/run/slurm-llnl /var/log/slurm-llnl
+Cgroup
+cd /etc/slurm
+cp cgroup.conf.example cgroup.conf
+Firewall
+firewall-cmd --permanent --zone=public --add-port=6818/tcp #slurmd
+firewall-cmd --reload
+Restart daemon
+systemctl enable slurmd
+systemctl start slurmd
